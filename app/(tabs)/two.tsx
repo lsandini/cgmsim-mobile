@@ -1,15 +1,4 @@
-// Get glucose color
-  const getGlucoseColor = (glucose: number): string => {
-    const targetLow = 70;
-    const targetHigh = 180;
-    
-    if (glucose < targetLow) {
-      return '#FF4444'; // Red
-    } else if (glucose > targetHigh) {
-      return '#FF8800'; // Orange
-    }
-    return '#4CAF50'; // Green
-  };import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -21,27 +10,259 @@ import {
   Dimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { LineChart } from 'react-native-gifted-charts';
 
-// Test Victory Native imports one by one
-let CartesianChart, Line, CartesianAxis, Area, Scatter;
-try {
-  const Victory = require('victory-native');
-  console.log('Victory native available components:', Object.keys(Victory));
-  CartesianChart = Victory.CartesianChart;
-  Line = Victory.Line;
-  CartesianAxis = Victory.CartesianAxis;
-  Area = Victory.Area;
-  Scatter = Victory.Scatter;
-} catch (error) {
-  console.log('Victory native import error:', error);
-}
-
+// Import your existing services
 import { databaseService, PatientProfile, Treatment, GlucoseReading, DEFAULT_PATIENT } from '../../services/DatabaseService';
 import { SimulationService } from '../../services/SimulationService';
+
+const { width: screenWidth } = Dimensions.get('window');
 
 type TimeScale = '2h' | '4h' | '6h' | '12h' | '24h';
 type GlucoseUnit = 'mg/dl' | 'mmol/l';
 
+// Data point interface for react-native-gifted-charts
+interface ChartDataPoint {
+  value: number;
+  label?: string;
+  dataPointText?: string;
+  textColor?: string;
+  textShiftY?: number;
+  textShiftX?: number;
+  dataPointColor?: string;
+  dataPointRadius?: number;
+  hideDataPoint?: boolean;
+  stripHeight?: number;
+  stripColor?: string;
+  stripOpacity?: number;
+  // Custom properties for our CGM data
+  timestamp?: string;
+  isPredicted?: boolean;
+  glucoseValue?: number;
+}
+
+// Get glucose color based on target ranges
+const getGlucoseColor = (glucose: number, glucoseUnit: GlucoseUnit = 'mg/dl'): string => {
+  const targetLow = glucoseUnit === 'mmol/l' ? 3.9 : 70;
+  const targetHigh = glucoseUnit === 'mmol/l' ? 10.0 : 180;
+  
+  if (glucose < targetLow) return '#FF4444'; // Red - Low
+  if (glucose > targetHigh) return '#FF8800'; // Orange - High
+  return '#4CAF50'; // Green - In range
+};
+
+// CGM Chart Component using react-native-gifted-charts
+const CGMGiftedChart: React.FC<{
+  data: ChartDataPoint[];
+  glucoseUnit: GlucoseUnit;
+  onPointSelected?: (point: ChartDataPoint) => void;
+  timeScale: TimeScale;
+}> = ({ data, glucoseUnit, onPointSelected, timeScale }) => {
+  const [selectedPoint, setSelectedPoint] = useState<ChartDataPoint | null>(null);
+
+  // Split data into past and predicted
+  const { pastData, futureData } = useMemo(() => {
+    const past = data.filter(point => !point.isPredicted);
+    const future = data.filter(point => point.isPredicted);
+    return { pastData: past, futureData: future };
+  }, [data]);
+
+  // Calculate chart parameters
+  const chartParams = useMemo(() => {
+    if (data.length === 0) return { maxValue: 300, minValue: 40, stepValue: 50 };
+    
+    const values = data.map(point => point.value);
+    const minVal = Math.min(...values);
+    const maxVal = Math.max(...values);
+    
+    // Add padding to min/max
+    const padding = (maxVal - minVal) * 0.1;
+    const chartMin = Math.max(40, minVal - padding);
+    const chartMax = Math.min(400, maxVal + padding);
+    
+    return {
+      maxValue: chartMax,
+      minValue: chartMin,
+      stepValue: Math.ceil((chartMax - chartMin) / 6),
+    };
+  }, [data]);
+
+  // Format glucose value
+  const formatGlucose = (value: number): string => {
+    if (glucoseUnit === 'mmol/l') {
+      return value.toFixed(1);
+    }
+    return Math.round(value).toString();
+  };
+
+  // Handle point press
+  const handlePointPress = (item: ChartDataPoint, index: number) => {
+    setSelectedPoint(item);
+    onPointSelected?.(item);
+  };
+
+  // Target range configuration
+  const targetLow = glucoseUnit === 'mmol/l' ? 3.9 : 70;
+  const targetHigh = glucoseUnit === 'mmol/l' ? 10.0 : 180;
+
+  if (data.length === 0) {
+    return (
+      <View style={chartStyles.emptyContainer}>
+        <Text style={chartStyles.emptyText}>No glucose data available</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={chartStyles.container}>
+      {/* Chart Title */}
+      <Text style={chartStyles.title}>
+        📊 CGM Glucose Trend ({timeScale})
+      </Text>
+      <Text style={chartStyles.subtitle}>
+        {pastData.length} past readings • {futureData.length} predictions
+      </Text>
+
+      {/* Selected Point Info */}
+      {selectedPoint && (
+        <View style={chartStyles.selectedInfo}>
+          <Text style={chartStyles.selectedText}>
+            📍 {selectedPoint.timestamp ? new Date(selectedPoint.timestamp).toLocaleTimeString() : 'Unknown time'} • 
+            {formatGlucose(selectedPoint.value)} {glucoseUnit} • 
+            {selectedPoint.isPredicted ? '🔮 Predicted' : '📊 Actual'}
+          </Text>
+        </View>
+      )}
+
+      {/* Target Range Info */}
+      <View style={chartStyles.targetRangeInfo}>
+        <Text style={chartStyles.targetRangeText}>
+          🎯 Target Range: {formatGlucose(targetLow)}-{formatGlucose(targetHigh)} {glucoseUnit}
+        </Text>
+      </View>
+
+      {/* Main Chart */}
+      <View style={chartStyles.chartWrapper}>
+        <LineChart
+          data={data}
+          width={screenWidth - 80}
+          height={280}
+          spacing={Math.max(30, (screenWidth - 120) / Math.max(1, data.length - 1))}
+          
+          // Styling
+          color="#2196F3"
+          thickness={3}
+          curved={true}
+          
+          // Y-axis configuration
+          maxValue={chartParams.maxValue}
+          minValue={chartParams.minValue}
+          stepValue={chartParams.stepValue}
+          noOfSections={6}
+          
+          // Grid and axes
+          showVerticalLines={true}
+          verticalLinesColor="#f0f0f0"
+          showHorizontalLines={true}
+          horizontalLinesColor="#e0e0e0"
+          
+          // Y-axis labels
+          yAxisColor="#666"
+          yAxisThickness={1}
+          yAxisTextStyle={{
+            color: '#666',
+            fontSize: 10,
+          }}
+          formatYLabel={(value) => formatGlucose(parseFloat(value))}
+          
+          // X-axis labels
+          xAxisColor="#666"
+          xAxisThickness={1}
+          xAxisTextStyle={{
+            color: '#666',
+            fontSize: 9,
+            rotation: -45,
+          }}
+          
+          // Data points
+          showDataPointsForMissingData={false}
+          dataPointsColor1="#2196F3"
+          dataPointsRadius={4}
+          textShiftY={-8}
+          textColor1="#333"
+          
+          // Interactions
+          pressEnabled={true}
+          onPress={handlePointPress}
+          
+          // Animation
+          animateOnDataChange={true}
+          animationDuration={1000}
+          
+          // Target range highlighting
+          showYAxisIndices={true}
+          yAxisIndicesColor="#ddd"
+          
+          // Background
+          backgroundColor="#fafafa"
+          
+          // Predicted data styling (if supported)
+          color2="#4CAF50"
+          thickness2={2}
+          
+          // Additional styling
+          initialSpacing={10}
+          endSpacing={10}
+        />
+        
+        {/* Target range overlay */}
+        <View style={[
+          chartStyles.targetRangeOverlay,
+          {
+            top: ((chartParams.maxValue - targetHigh) / (chartParams.maxValue - chartParams.minValue)) * 240 + 20,
+            height: ((targetHigh - targetLow) / (chartParams.maxValue - chartParams.minValue)) * 240,
+          }
+        ]} />
+      </View>
+
+      {/* Legend */}
+      <View style={chartStyles.legend}>
+        <View style={chartStyles.legendItem}>
+          <View style={[chartStyles.legendDot, { backgroundColor: '#2196F3' }]} />
+          <Text style={chartStyles.legendText}>Past (Actual)</Text>
+        </View>
+        <View style={chartStyles.legendItem}>
+          <View style={[chartStyles.legendDot, { backgroundColor: '#4CAF50', borderWidth: 1, borderColor: '#fff' }]} />
+          <Text style={chartStyles.legendText}>Future (Predicted)</Text>
+        </View>
+        <View style={chartStyles.legendItem}>
+          <View style={[chartStyles.legendDot, { backgroundColor: '#4CAF50' }]} />
+          <Text style={chartStyles.legendText}>In Range</Text>
+        </View>
+        <View style={chartStyles.legendItem}>
+          <View style={[chartStyles.legendDot, { backgroundColor: '#FF8800' }]} />
+          <Text style={chartStyles.legendText}>High</Text>
+        </View>
+        <View style={chartStyles.legendItem}>
+          <View style={[chartStyles.legendDot, { backgroundColor: '#FF4444' }]} />
+          <Text style={chartStyles.legendText}>Low</Text>
+        </View>
+      </View>
+
+      {/* Chart Info */}
+      <View style={chartStyles.chartInfo}>
+        <Text style={chartStyles.infoText}>
+          📱 Tap points for details • Smooth curves for trend analysis
+        </Text>
+        <Text style={chartStyles.infoSubText}>
+          Showing {data.length} glucose readings over {timeScale}
+        </Text>
+      </View>
+    </View>
+  );
+};
+
+// Main ChartScreen Component
 export default function ChartScreen() {
   const [patient, setPatient] = useState<PatientProfile | null>(null);
   const [treatments, setTreatments] = useState<Treatment[]>([]);
@@ -50,6 +271,7 @@ export default function ChartScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [timeScale, setTimeScale] = useState<TimeScale>('6h');
   const [glucoseUnit, setGlucoseUnit] = useState<GlucoseUnit>('mg/dl');
+  const [selectedDataPoint, setSelectedDataPoint] = useState<ChartDataPoint | null>(null);
 
   useEffect(() => {
     initializeChart();
@@ -72,7 +294,7 @@ export default function ChartScreen() {
         const readings = await databaseService.getGlucoseReadings(loadedPatient.id, 288);
         setGlucoseReadings(readings);
         
-        console.log(`Chart loaded: ${readings.length} glucose readings, ${chartTreatments.length} treatments`);
+        console.log(`📊 Chart loaded: ${readings.length} glucose readings, ${chartTreatments.length} treatments`);
       }
       
     } catch (error) {
@@ -91,7 +313,7 @@ export default function ChartScreen() {
 
   // Convert mg/dL to mmol/L
   const convertToMmol = (mgdl: number): number => {
-    return Math.round((mgdl / 18.0) * 10) / 10; // Round to 1 decimal
+    return Math.round((mgdl / 18.0) * 10) / 10;
   };
 
   // Format glucose value based on unit
@@ -152,6 +374,33 @@ export default function ChartScreen() {
   const { all: chartData, past: pastData, future: futureData } = getFilteredReadings();
   const chartTreatments = getFilteredTreatments();
 
+  // Convert glucose readings to chart format
+  const chartPoints: ChartDataPoint[] = useMemo(() => {
+    return chartData.map((reading, index) => {
+      const isPredicted = new Date(reading.timestamp) > new Date();
+      const convertedValue = glucoseUnit === 'mmol/l' ? convertToMmol(reading.glucoseValue) : reading.glucoseValue;
+      const time = new Date(reading.timestamp);
+      
+      return {
+        value: convertedValue,
+        label: index % 12 === 0 ? time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+        dataPointColor: getGlucoseColor(reading.glucoseValue, glucoseUnit),
+        dataPointRadius: isPredicted ? 3 : 4,
+        hideDataPoint: false,
+        timestamp: reading.timestamp,
+        isPredicted,
+        glucoseValue: reading.glucoseValue,
+        textColor: '#333',
+        textShiftY: -10,
+      };
+    });
+  }, [chartData, glucoseUnit]);
+
+  // Handle data point selection
+  const handleDataPointPress = (point: ChartDataPoint) => {
+    setSelectedDataPoint(point);
+  };
+
   // Time scale selector
   const TimeScaleSelector = () => (
     <View style={styles.selectorContainer}>
@@ -204,217 +453,43 @@ export default function ChartScreen() {
     </View>
   );
 
-  // Simple glucose data table
-  const GlucoseDataTable = () => {
-    const sampleData = chartData.filter((_, index) => index % 12 === 0); // Every hour
-    
-    return (
-      <View style={styles.dataTable}>
-        <Text style={styles.dataTableTitle}>Glucose Data ({timeScale} view)</Text>
-        <View style={styles.dataTableHeader}>
-          <Text style={styles.dataTableHeaderText}>Time</Text>
-          <Text style={styles.dataTableHeaderText}>Glucose</Text>
-          <Text style={styles.dataTableHeaderText}>Type</Text>
-        </View>
-        {sampleData.slice(0, 12).map((reading, index) => {
-          const time = new Date(reading.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-          const glucose = formatGlucose(reading.glucoseValue);
-          const isPast = new Date(reading.timestamp) <= new Date();
-          
-          return (
-            <View key={reading.id} style={styles.dataTableRow}>
-              <Text style={styles.dataTableCell}>{time}</Text>
-              <Text style={[
-                styles.dataTableCell,
-                { color: getGlucoseColor(reading.glucoseValue) }
-              ]}>
-                {glucose} {glucoseUnit}
-              </Text>
-              <Text style={styles.dataTableCell}>
-                {isPast ? 'Past' : 'Predicted'}
-              </Text>
-            </View>
-          );
-        })}
-      </View>
-    );
-  };
-
-  // Victory Native 41.x Chart with Axes
-  const VictoryGlucoseChart = () => {
-    if (!CartesianChart || !Line) {
-      return (
-        <View style={styles.chartContainer}>
-          <Text style={styles.chartError}>Victory Native components not available</Text>
-        </View>
-      );
-    }
-
-    // CGM display: 3 hours past + 6 hours future = 9 hours total
-    const hoursBack = 3;
-    const hoursFuture = 6;
-    const totalPoints = (hoursBack + hoursFuture) * 12; // 12 points per hour (5-min intervals)
-    
-    const now = new Date();
-    const startTime = new Date(now.getTime() - hoursBack * 60 * 60 * 1000); // 3 hours ago
-    
-    const chartPoints = chartData
-      .filter(reading => {
-        const readingTime = new Date(reading.timestamp);
-        return readingTime >= startTime;
-      })
-      .slice(0, totalPoints) // Limit to 9 hours total
-      .map((reading, index) => {
-        const time = new Date(reading.timestamp);
-        const isPast = time <= now;
-        
-        return {
-          x: index,
-          y: Math.round(reading.glucoseValue),
-          time: time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          timestamp: reading.timestamp,
-          isPast: isPast
-        };
-      });
-
-    // Split into past and future points
-    const pastPoints = chartPoints.filter(point => point.isPast);
-    const futurePoints = chartPoints.filter(point => !point.isPast);
-
-    console.log(`CGM data: ${chartPoints.length} total points (${pastPoints.length} past, ${futurePoints.length} future)`);
-    console.log(`Duration: ${hoursBack}h past + ${hoursFuture}h future = ${hoursBack + hoursFuture}h total`);
-    console.log('Time range:', chartPoints[0]?.time, 'to', chartPoints[chartPoints.length - 1]?.time);
-
-    if (chartPoints.length === 0) {
-      return (
-        <View style={styles.chartContainer}>
-          <Text style={styles.chartTitle}>No Data</Text>
-        </View>
-      );
-    }
-
-    // Calculate domains - fixed Y scale like real CGM
-    const yMin = 40;  // Fixed minimum like real CGM
-    const yMax = 300; // Fixed maximum like real CGM
-    const yPadding = 0; // No padding needed with fixed scale
-
-    try {
-      return (
-        <View style={styles.chartContainer}>
-          <Text style={styles.chartTitle}>CGM Display • 3h Past + 6h Predicted</Text>
-          <Text style={styles.chartDebug}>
-            {pastPoints.length} past readings (blue) • {futurePoints.length} predictions (green) • Y-scale: 40-300 mg/dL
+  // Current stats component
+  const CurrentStats = () => (
+    <View style={styles.statsContainer}>
+      <Text style={styles.statsTitle}>📊 Current Status</Text>
+      <Text style={styles.statsText}>
+        Current: {formatGlucose(SimulationService.getCurrentGlucoseValue(glucoseReadings))} {glucoseUnit}
+      </Text>
+      <Text style={styles.statsText}>
+        Trend: {SimulationService.calculateTrend(glucoseReadings)}
+      </Text>
+      <Text style={styles.statsText}>
+        Time Scale: {timeScale} • Total Points: {chartData.length}
+      </Text>
+      <Text style={styles.statsText}>
+        Target Range: {formatGlucose(70)}-{formatGlucose(180)} {glucoseUnit}
+      </Text>
+      {selectedDataPoint && (
+        <View style={styles.selectedPointInfo}>
+          <Text style={styles.selectedPointTitle}>📍 Selected Point:</Text>
+          <Text style={styles.selectedPointText}>
+            Time: {selectedDataPoint.timestamp ? new Date(selectedDataPoint.timestamp).toLocaleString() : 'Unknown'}
           </Text>
-          
-          <View style={styles.chartWrapper}>
-            {/* Y-axis labels positioned absolutely */}
-            <View style={styles.yAxisContainer}>
-              {(() => {
-                // Calculate Y-axis tick positions for 40-300 range
-                const tickValues = [50, 100, 150, 200, 250]; // Major ticks
-                const chartHeight = 250;
-                const yRange = 300 - 40; // 260 mg/dL range
-                const ticks = [];
-                
-                tickValues.forEach(value => {
-                  const position = chartHeight - (chartHeight * (value - 40) / yRange) - 10;
-                  ticks.push({ value, position });
-                });
-                
-                return ticks.map((tick, index) => (
-                  <View
-                    key={index}
-                    style={[
-                      styles.yAxisTick,
-                      { top: tick.position }
-                    ]}
-                  >
-                    <Text style={styles.yAxisLabel}>{tick.value}</Text>
-                    <View style={styles.yAxisLine} />
-                  </View>
-                ));
-              })()}
-            </View>
-            
-            <CartesianChart
-              data={chartPoints}
-              xKey="x"
-              yKeys={["y"]}
-              height={250}
-              width={350}
-              domain={{
-                y: [yMin, yMax] // Fixed 40-300 range
-              }}
-            >
-              {({ points, chartBounds }) => {
-                console.log('Chart render - Fixed Y domain: 40-300 mg/dL');
-                console.log('Total points for display:', points.y?.length || 0);
-                
-                // Split points into past and future based on original data
-                const pastPointsData = points.y?.filter((point, index) => chartPoints[index]?.isPast) || [];
-                const futurePointsData = points.y?.filter((point, index) => !chartPoints[index]?.isPast) || [];
-                
-                console.log(`Rendering: ${pastPointsData.length} past (blue), ${futurePointsData.length} future (green)`);
-                
-                return (
-                  <>
-                    {/* Past CGM dots (blue) - no connecting lines */}
-                    {Scatter && pastPointsData.length > 0 && (
-                      <Scatter 
-                        points={pastPointsData}
-                        radius={2.5}
-                        color="#2196F3"
-                        opacity={1}
-                      />
-                    )}
-                    
-                    {/* Future prediction dots (green) - no connecting lines */}
-                    {Scatter && futurePointsData.length > 0 && (
-                      <Scatter 
-                        points={futurePointsData}
-                        radius={2.5}
-                        color="#4CAF50"
-                        opacity={0.8}
-                      />
-                    )}
-                  </>
-                );
-              }}
-            </CartesianChart>
-          </View>
-          
-          {/* Manual axis labels below chart */}
-          <View style={styles.axisLabels}>
-            <View style={styles.xAxisLabels}>
-              <Text style={styles.axisLabel}>3h ago: {chartPoints[0]?.time}</Text>
-              <Text style={styles.axisLabel}>Now ← → Future</Text>
-              <Text style={styles.axisLabel}>+6h: {chartPoints[chartPoints.length - 1]?.time}</Text>
-            </View>
-            <View style={styles.yAxisLabels}>
-              <Text style={styles.axisLabel}>🔵 Past readings • 🟢 Predictions</Text>
-            </View>
-          </View>
-          
-          <Text style={styles.chartSubtitle}>
-            🔵 Past 3 hours (actual CGM) • 🟢 Next 6 hours (predicted) • Dots only, no lines
+          <Text style={styles.selectedPointText}>
+            Glucose: {formatGlucose(selectedDataPoint.glucoseValue || selectedDataPoint.value)} {glucoseUnit}
+          </Text>
+          <Text style={styles.selectedPointText}>
+            Type: {selectedDataPoint.isPredicted ? '🔮 Predicted' : '📊 Actual'}
           </Text>
         </View>
-      );
-    } catch (error) {
-      console.error('Chart error:', error);
-      return (
-        <View style={styles.chartContainer}>
-          <Text style={styles.chartError}>Chart Error</Text>
-          <Text style={styles.chartErrorSub}>{error.toString()}</Text>
-        </View>
-      );
-    }
-  };
+      )}
+    </View>
+  );
 
   // Treatment list
   const TreatmentsList = () => (
     <View style={styles.treatmentsContainer}>
-      <Text style={styles.treatmentsTitle}>Treatments in {timeScale}</Text>
+      <Text style={styles.treatmentsTitle}>💊 Treatments in {timeScale}</Text>
       {chartTreatments.length === 0 ? (
         <Text style={styles.emptyText}>No treatments in this time range</Text>
       ) : (
@@ -475,7 +550,7 @@ export default function ChartScreen() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       >
         <View style={styles.header}>
-          <Text style={styles.title}>Glucose Chart</Text>
+          <Text style={styles.title}>🩺 CGM Chart (High Performance)</Text>
           <Text style={styles.subtitle}>
             {chartData.length} readings • {pastData.length} past • {futureData.length} predicted
           </Text>
@@ -491,39 +566,17 @@ export default function ChartScreen() {
           </View>
         ) : (
           <>
-            {/* Current stats */}
-            <View style={styles.statsContainer}>
-              <Text style={styles.statsTitle}>Current Status</Text>
-              <Text style={styles.statsText}>
-                Current: {formatGlucose(SimulationService.getCurrentGlucoseValue(glucoseReadings))} {glucoseUnit}
-              </Text>
-              <Text style={styles.statsText}>
-                Trend: {SimulationService.calculateTrend(glucoseReadings)}
-              </Text>
-              <Text style={styles.statsText}>
-                Time Scale: {timeScale} • Total Points: {chartData.length}
-              </Text>
-              <Text style={styles.statsText}>
-                Target Range: {formatGlucose(70)}-{formatGlucose(180)} {glucoseUnit}
-              </Text>
-            </View>
-
-            <GlucoseDataTable />
-            <VictoryGlucoseChart />
+            <CurrentStats />
+            
+            {/* High-Performance CGM Chart */}
+            <CGMGiftedChart
+              data={chartPoints}
+              glucoseUnit={glucoseUnit}
+              onPointSelected={handleDataPointPress}
+              timeScale={timeScale}
+            />
+            
             <TreatmentsList />
-
-            {/* Chart placeholder */}
-            <View style={styles.chartPlaceholder}>
-              <Text style={styles.chartPlaceholderTitle}>📊 Victory Native Chart Coming Soon</Text>
-              <Text style={styles.chartPlaceholderText}>
-                Chart will show glucose curve with:
-              </Text>
-              <Text style={styles.chartPlaceholderText}>• Past glucose (solid line)</Text>
-              <Text style={styles.chartPlaceholderText}>• Predicted glucose (dashed line)</Text>
-              <Text style={styles.chartPlaceholderText}>• Target range (70-180 {glucoseUnit})</Text>
-              <Text style={styles.chartPlaceholderText}>• Treatment markers</Text>
-              <Text style={styles.chartPlaceholderText}>• Time scale: {timeScale}</Text>
-            </View>
           </>
         )}
       </ScrollView>
@@ -531,6 +584,129 @@ export default function ChartScreen() {
   );
 }
 
+// Chart-specific styles
+const chartStyles = StyleSheet.create({
+  container: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 20,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
+  },
+  title: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#333',
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+  subtitle: {
+    fontSize: 12,
+    color: '#666',
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  selectedInfo: {
+    backgroundColor: '#e3f2fd',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 12,
+    borderLeftWidth: 4,
+    borderLeftColor: '#2196F3',
+  },
+  selectedText: {
+    fontSize: 14,
+    color: '#1976d2',
+    fontWeight: '600',
+  },
+  targetRangeInfo: {
+    backgroundColor: '#f3e5f5',
+    borderRadius: 6,
+    padding: 8,
+    marginBottom: 12,
+    alignItems: 'center',
+  },
+  targetRangeText: {
+    fontSize: 12,
+    color: '#7b1fa2',
+    fontWeight: '500',
+  },
+  chartWrapper: {
+    backgroundColor: '#fafafa',
+    borderRadius: 8,
+    padding: 16,
+    marginBottom: 16,
+    position: 'relative',
+  },
+  targetRangeOverlay: {
+    position: 'absolute',
+    left: 60,
+    right: 20,
+    backgroundColor: 'rgba(76, 175, 80, 0.1)',
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: 'rgba(76, 175, 80, 0.3)',
+    pointerEvents: 'none',
+  },
+  legend: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    marginBottom: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#f0f0f0',
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 8,
+    marginVertical: 2,
+  },
+  legendDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 6,
+  },
+  legendText: {
+    fontSize: 11,
+    color: '#666',
+    fontWeight: '500',
+  },
+  chartInfo: {
+    alignItems: 'center',
+  },
+  infoText: {
+    fontSize: 11,
+    color: '#666',
+    textAlign: 'center',
+    marginBottom: 4,
+  },
+  infoSubText: {
+    fontSize: 10,
+    color: '#999',
+    textAlign: 'center',
+  },
+  emptyContainer: {
+    height: 200,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#f9f9f9',
+    borderRadius: 8,
+  },
+  emptyText: {
+    fontSize: 16,
+    color: '#666',
+    textAlign: 'center',
+  },
+});
+
+// Main screen styles
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -547,24 +723,24 @@ const styles = StyleSheet.create({
   },
   header: {
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 24,
   },
   title: {
-    fontSize: 24,
+    fontSize: 26,
     fontWeight: 'bold',
     color: '#2196F3',
   },
   subtitle: {
     fontSize: 14,
     color: '#666',
-    marginTop: 5,
+    marginTop: 8,
   },
   selectorContainer: {
-    marginBottom: 15,
+    marginBottom: 16,
   },
   selectorLabel: {
     fontSize: 16,
-    fontWeight: '500',
+    fontWeight: '600',
     color: '#333',
     marginBottom: 8,
   },
@@ -574,27 +750,27 @@ const styles = StyleSheet.create({
   },
   selectorButton: {
     backgroundColor: '#f0f0f0',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 6,
-    minWidth: 50,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    minWidth: 55,
     alignItems: 'center',
   },
   selectorButtonActive: {
     backgroundColor: '#2196F3',
   },
   selectorButtonText: {
-    fontSize: 12,
+    fontSize: 13,
     color: '#666',
-    fontWeight: '500',
+    fontWeight: '600',
   },
   selectorButtonTextActive: {
     color: '#fff',
   },
   statsContainer: {
     backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 15,
+    borderRadius: 12,
+    padding: 16,
     marginBottom: 20,
     elevation: 2,
     shadowColor: '#000',
@@ -603,191 +779,39 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
   },
   statsTitle: {
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: 'bold',
     color: '#333',
-    marginBottom: 10,
+    marginBottom: 12,
   },
   statsText: {
     fontSize: 14,
     color: '#666',
-    marginBottom: 5,
+    marginBottom: 6,
   },
-  dataTable: {
-    backgroundColor: '#fff',
+  selectedPointInfo: {
+    marginTop: 12,
+    padding: 12,
+    backgroundColor: '#e8f5e8',
     borderRadius: 8,
-    padding: 15,
-    marginBottom: 20,
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
+    borderLeftWidth: 4,
+    borderLeftColor: '#4CAF50',
   },
-  dataTableTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#333',
-    marginBottom: 10,
-  },
-  dataTableHeader: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-    borderBottomColor: '#e0e0e0',
-    paddingBottom: 8,
-    marginBottom: 8,
-  },
-  dataTableHeaderText: {
-    flex: 1,
-    fontSize: 12,
-    fontWeight: 'bold',
-    color: '#666',
-    textAlign: 'center',
-  },
-  dataTableRow: {
-    flexDirection: 'row',
-    paddingVertical: 4,
-  },
-  dataTableCell: {
-    flex: 1,
-    fontSize: 12,
-    color: '#333',
-    textAlign: 'center',
-  },
-  chartContainer: {
-    backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 15,
-    marginBottom: 20,
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    minHeight: 300, // Ensure minimum height
-  },
-  chartWrapper: {
-    backgroundColor: '#f9f9f9',
-    borderWidth: 2,
-    borderColor: '#e0e0e0',
-    borderRadius: 4,
-    padding: 10,
-    marginVertical: 10,
-    height: 270, // Fixed height
-    position: 'relative', // Enable absolute positioning for Y-axis
-  },
-  yAxisContainer: {
-    position: 'absolute',
-    left: 0,
-    top: 10,
-    width: 50,
-    height: 250,
-    zIndex: 10, // Above chart
-  },
-  yAxisTick: {
-    position: 'absolute',
-    left: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    width: 50,
-  },
-  yAxisLabel: {
-    fontSize: 10,
-    color: '#666',
-    textAlign: 'right',
-    width: 35,
-    marginRight: 3,
-  },
-  yAxisLine: {
-    width: 5,
-    height: 1,
-    backgroundColor: '#ccc',
-  },
-  axisLabels: {
-    marginTop: 5,
-  },
-  xAxisLabels: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 5,
-  },
-  yAxisLabels: {
-    alignItems: 'center',
-  },
-  axisLabel: {
-    fontSize: 11,
-    color: '#666',
-    fontWeight: '500',
-  },
-  chartTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#333',
-    marginBottom: 5,
-    textAlign: 'center',
-  },
-  chartDebug: {
-    fontSize: 12,
-    color: '#666',
-    textAlign: 'center',
-    marginBottom: 5,
-  },
-  chartSubtitle: {
-    fontSize: 12,
-    color: '#666',
-    marginBottom: 10,
-    textAlign: 'center',
-  },
-  targetRangeInfo: {
-    marginTop: 10,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: '#f0f0f0',
-  },
-  targetRangeText: {
-    fontSize: 12,
-    color: '#666',
-    textAlign: 'center',
-    marginBottom: 3,
-  },
-  chartError: {
+  selectedPointTitle: {
     fontSize: 14,
-    color: '#FF4444',
-    textAlign: 'center',
-    marginBottom: 5,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 6,
   },
-  chartErrorSub: {
+  selectedPointText: {
     fontSize: 12,
-    color: '#999',
-    textAlign: 'center',
-  },
-  chartLegend: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    marginTop: 10,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: '#f0f0f0',
-  },
-  legendRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginHorizontal: 10,
-  },
-  legendDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    marginRight: 5,
-  },
-  legendText: {
-    fontSize: 11,
     color: '#666',
+    marginBottom: 3,
   },
   treatmentsContainer: {
     backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 15,
+    borderRadius: 12,
+    padding: 16,
     marginBottom: 20,
     elevation: 2,
     shadowColor: '#000',
@@ -796,16 +820,16 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
   },
   treatmentsTitle: {
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: 'bold',
     color: '#333',
-    marginBottom: 10,
+    marginBottom: 12,
   },
   treatmentItem: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 8,
+    paddingVertical: 10,
     borderBottomWidth: 1,
     borderBottomColor: '#f0f0f0',
   },
@@ -820,32 +844,12 @@ const styles = StyleSheet.create({
   treatmentDetails: {
     fontSize: 12,
     color: '#666',
+    marginTop: 2,
   },
   treatmentTime: {
-    fontSize: 10,
+    fontSize: 11,
     color: '#999',
-  },
-  chartPlaceholder: {
-    backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 20,
-    alignItems: 'center',
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-  },
-  chartPlaceholderTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#333',
-    marginBottom: 10,
-  },
-  chartPlaceholderText: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 5,
+    textAlign: 'right',
   },
   loadingText: {
     fontSize: 16,
@@ -860,6 +864,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#999',
     textAlign: 'center',
-    marginTop: 5,
+    marginTop: 8,
   },
 });
