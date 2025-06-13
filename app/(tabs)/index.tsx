@@ -3,15 +3,18 @@ import { View, Text, StyleSheet, ScrollView, Alert, RefreshControl } from 'react
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Button } from 'react-native-elements';
 
-import { databaseService, PatientProfile, Treatment, DEFAULT_PATIENT } from '../../services/DatabaseService';
+import { databaseService, PatientProfile, Treatment, GlucoseReading, DEFAULT_PATIENT } from '../../services/DatabaseService';
+import { SimulationService } from '../../services/SimulationService';
 import { TreatmentInputModal } from '../../components/TreatmentInputModal';
 
 export default function HomeScreen() {
   const [patient, setPatient] = useState<PatientProfile | null>(null);
   const [treatments, setTreatments] = useState<Treatment[]>([]);
+  const [glucoseReadings, setGlucoseReadings] = useState<GlucoseReading[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [currentGlucose] = useState(120); // Mock glucose value for now
+  const [currentGlucose, setCurrentGlucose] = useState(120);
+  const [trend, setTrend] = useState('→');
   const [modalVisible, setModalVisible] = useState(false);
   const [modalInitialType, setModalInitialType] = useState<Treatment['type']>('meal');
 
@@ -30,10 +33,26 @@ export default function HomeScreen() {
       const loadedPatient = await databaseService.getPatient(DEFAULT_PATIENT.id);
       setPatient(loadedPatient);
 
-      // Load recent treatments
       if (loadedPatient) {
-        const recentTreatments = await databaseService.getTreatments(loadedPatient.id, 5);
-        setTreatments(recentTreatments);
+        // Load recent treatments (only last 4 hours for simulation)
+        const simulationTreatments = await databaseService.getTreatments(loadedPatient.id, 10, 4);
+        
+        // Load more treatments for display (last 12 hours)
+        const displayTreatments = await databaseService.getTreatments(loadedPatient.id, 8, 12);
+        setTreatments(displayTreatments);
+
+        // Load or generate glucose readings
+        let existingReadings = await databaseService.getGlucoseReadings(loadedPatient.id, 288);
+        
+        if (existingReadings.length === 0) {
+          // No glucose data yet - run initial simulation
+          console.log('No glucose data found, running initial simulation...');
+          await runSimulation(loadedPatient, simulationTreatments);
+        } else {
+          // Load existing glucose data
+          setGlucoseReadings(existingReadings);
+          updateCurrentGlucose(existingReadings);
+        }
       }
       
     } catch (error) {
@@ -42,6 +61,75 @@ export default function HomeScreen() {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Run glucose simulation
+  const runSimulation = async (patientData: PatientProfile, treatmentData: Treatment[]) => {
+    try {
+      console.log('\n🔬 STARTING GLUCOSE SIMULATION...');
+      console.log(`Patient: ${patientData.name} (ISF: ${patientData.insulinSensitivityFactor}, CR: ${patientData.carbRatio})`);
+      console.log(`Treatments to process: ${treatmentData.length}`);
+      
+      // Log treatments with better timestamp formatting
+      treatmentData.forEach((treatment, index) => {
+        const treatmentDate = new Date(treatment.timestamp);
+        const now = new Date();
+        const isToday = treatmentDate.toDateString() === now.toDateString();
+        const timeStr = isToday 
+          ? treatmentDate.toLocaleTimeString() 
+          : treatmentDate.toLocaleString();
+        const ageMinutes = Math.round((now.getTime() - treatmentDate.getTime()) / (1000 * 60));
+        
+        let details = '';
+        switch (treatment.type) {
+          case 'meal':
+            details = `${treatment.carbohydrates}g carbs`;
+            break;
+          case 'rapid_insulin':
+          case 'correction':
+            details = `${treatment.rapidInsulin}U rapid insulin`;
+            break;
+          case 'long_insulin':
+            details = `${treatment.longInsulin}U long insulin`;
+            break;
+          case 'exercise':
+            details = `${treatment.exerciseDuration}min ${treatment.exerciseType} exercise`;
+            break;
+        }
+        console.log(`  ${index + 1}. ${timeStr} (${ageMinutes}min ago) - ${treatment.type}: ${details}`);
+      });
+      
+      // Calculate 24-hour glucose curve
+      const newReadings = await SimulationService.calculateGlucoseCurve(patientData, treatmentData);
+      
+      // Save to database
+      await databaseService.saveGlucoseReadings(newReadings);
+      
+      // Update state
+      setGlucoseReadings(newReadings);
+      updateCurrentGlucose(newReadings);
+      
+      console.log('✅ Simulation completed and saved to database');
+    } catch (error) {
+      console.error('❌ Simulation failed:', error);
+      Alert.alert('Simulation Error', 'Failed to calculate glucose curve');
+    }
+  };
+
+  // Update current glucose and trend from readings
+  const updateCurrentGlucose = (readings: GlucoseReading[]) => {
+    if (readings.length === 0) return;
+    
+    const current = SimulationService.getCurrentGlucoseValue(readings);
+    const currentTrend = SimulationService.calculateTrend(readings);
+    
+    const roundedCurrent = Math.round(current);
+    
+    // Log glucose update
+    console.log(`📊 GLUCOSE UPDATE: ${roundedCurrent} mg/dL ${currentTrend} (${new Date().toLocaleTimeString()})`);
+    
+    setCurrentGlucose(roundedCurrent);
+    setTrend(currentTrend);
   };
 
   const onRefresh = async () => {
@@ -60,11 +148,17 @@ export default function HomeScreen() {
         patientId: patient.id
       };
 
+      // Save treatment to database
       await databaseService.saveTreatment(treatment);
       
-      // Reload treatments
-      const recentTreatments = await databaseService.getTreatments(patient.id, 5);
-      setTreatments(recentTreatments);
+      // Reload treatments for simulation (4 hours) and display (12 hours)
+      const simulationTreatments = await databaseService.getTreatments(patient.id, 10, 4);
+      const displayTreatments = await databaseService.getTreatments(patient.id, 8, 12);
+      setTreatments(displayTreatments);
+
+      // Recalculate glucose curve with new treatment
+      console.log(`\n💉 NEW TREATMENT ADDED: ${treatment.type}`);
+      await runSimulation(patient, simulationTreatments);
 
       return true;
     } catch (error) {
@@ -72,6 +166,17 @@ export default function HomeScreen() {
       return false;
     }
   };
+
+  // Auto-update glucose display every minute
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (glucoseReadings.length > 0) {
+        updateCurrentGlucose(glucoseReadings);
+      }
+    }, 60000); // Every minute
+
+    return () => clearInterval(interval);
+  }, [glucoseReadings]);
 
   const openTreatmentModal = (type: 'meal' | 'insulin' | 'exercise') => {
     let treatmentType: Treatment['type'];
@@ -111,7 +216,21 @@ export default function HomeScreen() {
   };
 
   const formatTime = (timestamp: string): string => {
-    return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const treatmentDate = new Date(timestamp);
+    const now = new Date();
+    const ageMinutes = Math.round((now.getTime() - treatmentDate.getTime()) / (1000 * 60));
+    const isToday = treatmentDate.toDateString() === now.toDateString();
+    
+    const timeStr = isToday 
+      ? treatmentDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : treatmentDate.toLocaleDateString() + ' ' + treatmentDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    
+    if (ageMinutes < 60) {
+      return `${timeStr} (${ageMinutes}m ago)`;
+    } else {
+      const ageHours = Math.round(ageMinutes / 60);
+      return `${timeStr} (${ageHours}h ago)`;
+    }
   };
 
   const getGlucoseColor = (glucose: number): string => {
@@ -168,9 +287,12 @@ export default function HomeScreen() {
               {currentGlucose}
             </Text>
             <Text style={styles.glucoseUnit}>mg/dL</Text>
-            <Text style={styles.trendArrow}>→</Text>
+            <Text style={styles.trendArrow}>{trend}</Text>
           </View>
-          <Text style={styles.lastUpdate}>Last updated: {new Date().toLocaleTimeString()}</Text>
+          <Text style={styles.lastUpdate}>
+            Last updated: {new Date().toLocaleTimeString()}
+            {glucoseReadings.length > 0 && ` • ${glucoseReadings.length} readings`}
+          </Text>
         </View>
 
         {/* Quick Actions */}
@@ -272,8 +394,13 @@ export default function HomeScreen() {
             ✅ Treatment logging active
           </Text>
           <Text style={styles.statusText}>
-            🔄 Simulation ready
+            {glucoseReadings.length > 0 ? '✅' : '🔄'} Glucose simulation {glucoseReadings.length > 0 ? 'active' : 'ready'}
           </Text>
+          {glucoseReadings.length > 0 && (
+            <Text style={styles.statusText}>
+              📊 {glucoseReadings.length} glucose points generated
+            </Text>
+          )}
         </View>
       </ScrollView>
 

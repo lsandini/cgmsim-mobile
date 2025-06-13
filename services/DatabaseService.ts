@@ -1,4 +1,11 @@
-import * as SQLite from 'expo-sqlite';
+interface GlucoseReading {
+  id: string;
+  patientId: string;
+  timestamp: string; // ISO date
+  glucoseValue: number; // mg/dL
+  isPredicted: boolean;
+  calculationTimestamp: string; // ISO date
+}import * as SQLite from 'expo-sqlite';
 
 interface PatientProfile {
   id: string;
@@ -86,6 +93,28 @@ class DatabaseService {
           notes TEXT,
           FOREIGN KEY (patient_id) REFERENCES patients (id) ON DELETE CASCADE
         );
+      `);
+
+      // Create glucose readings table
+      await this.db.execAsync(`
+        CREATE TABLE IF NOT EXISTS glucose_readings (
+          id TEXT PRIMARY KEY,
+          patient_id TEXT NOT NULL,
+          timestamp TEXT NOT NULL,
+          glucose_value REAL NOT NULL CHECK (glucose_value >= 20 AND glucose_value <= 600),
+          is_predicted BOOLEAN DEFAULT 1,
+          calculation_timestamp TEXT NOT NULL,
+          FOREIGN KEY (patient_id) REFERENCES patients (id) ON DELETE CASCADE
+        );
+      `);
+
+      // Create indexes for better performance
+      await this.db.execAsync(`
+        CREATE INDEX IF NOT EXISTS idx_glucose_patient_time ON glucose_readings (patient_id, timestamp);
+      `);
+      
+      await this.db.execAsync(`
+        CREATE INDEX IF NOT EXISTS idx_treatments_patient_time ON treatments (patient_id, timestamp);
       `);
 
       // Insert default patient if doesn't exist
@@ -195,16 +224,21 @@ class DatabaseService {
     }
   }
 
-  async getTreatments(patientId: string, limit: number = 10): Promise<Treatment[]> {
+  async getTreatments(patientId: string, limit: number = 10, hoursBack: number = 6): Promise<Treatment[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     try {
+      // Only get treatments from the last X hours
+      const cutoffTime = new Date(Date.now() - hoursBack * 60 * 60 * 1000).toISOString();
+      
       const results = await this.db.getAllAsync(`
         SELECT * FROM treatments 
-        WHERE patient_id = ? 
+        WHERE patient_id = ? AND timestamp >= ?
         ORDER BY timestamp DESC 
         LIMIT ?
-      `, [patientId, limit]);
+      `, [patientId, cutoffTime, limit]);
+
+      console.log(`Loading treatments since ${new Date(cutoffTime).toLocaleString()} (${hoursBack}h ago)`);
 
       return results.map((row: any) => ({
         id: row.id,
@@ -224,6 +258,67 @@ class DatabaseService {
     }
   }
 
+  async saveGlucoseReadings(readings: GlucoseReading[]): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    try {
+      // Clear existing predicted readings for this patient
+      if (readings.length > 0) {
+        await this.db.runAsync(
+          'DELETE FROM glucose_readings WHERE patient_id = ? AND is_predicted = 1',
+          [readings[0].patientId]
+        );
+      }
+
+      // Insert new readings
+      for (const reading of readings) {
+        await this.db.runAsync(`
+          INSERT INTO glucose_readings (
+            id, patient_id, timestamp, glucose_value,
+            is_predicted, calculation_timestamp
+          ) VALUES (?, ?, ?, ?, ?, ?)
+        `, [
+          reading.id,
+          reading.patientId,
+          reading.timestamp,
+          reading.glucoseValue,
+          reading.isPredicted ? 1 : 0,
+          reading.calculationTimestamp
+        ]);
+      }
+      
+      console.log(`Saved ${readings.length} glucose readings`);
+    } catch (error) {
+      console.error('Error saving glucose readings:', error);
+      throw error;
+    }
+  }
+
+  async getGlucoseReadings(patientId: string, limit: number = 288): Promise<GlucoseReading[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    try {
+      const results = await this.db.getAllAsync(`
+        SELECT * FROM glucose_readings 
+        WHERE patient_id = ? 
+        ORDER BY timestamp DESC 
+        LIMIT ?
+      `, [patientId, limit]);
+
+      return results.map((row: any) => ({
+        id: row.id,
+        patientId: row.patient_id,
+        timestamp: row.timestamp,
+        glucoseValue: row.glucose_value,
+        isPredicted: row.is_predicted === 1,
+        calculationTimestamp: row.calculation_timestamp
+      }));
+    } catch (error) {
+      console.error('Error getting glucose readings:', error);
+      return [];
+    }
+  }
+
   async closeDatabase(): Promise<void> {
     if (this.db) {
       await this.db.closeAsync();
@@ -235,4 +330,4 @@ class DatabaseService {
 
 export const databaseService = new DatabaseService();
 export { DEFAULT_PATIENT };
-export type { PatientProfile, Treatment };
+export type { PatientProfile, Treatment, GlucoseReading };
